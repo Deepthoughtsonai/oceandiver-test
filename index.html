@@ -68,6 +68,106 @@ function drawShark() {
   ctx.restore();
 }
 
+// Little fish: a few Nemo-style clownfish plus other kinds.
+const kinds = ["nemo", "nemo", "nemo", "tang", "tang", "yellow", "yellow", "green"];
+const fishes = [];
+for (let i = 0; i < 16; i++) {
+  fishes.push({
+    kind: kinds[i % kinds.length],
+    x: Math.random() * canvas.width,
+    y: Math.random() * canvas.height,
+    vx: (Math.random() - 0.5) * 2,
+    vy: (Math.random() - 0.5),
+    size: 0.7 + Math.random() * 0.5,
+    heading: Math.random() * Math.PI * 2
+  });
+}
+
+function drawFish(f) {
+  const dir = f.vx >= 0 ? 1 : -1;
+  const wiggle = Math.sin(performance.now() / 120 + f.heading * 10) * 4;
+  ctx.save();
+  ctx.translate(f.x, f.y);
+  ctx.scale(dir * f.size, f.size);
+  ctx.rotate(Math.max(-0.5, Math.min(0.5, f.vy * 0.15)) * dir);
+
+  const body = { nemo: "#ff7a1a", tang: "#2a5bd7", yellow: "#ffd23a", green: "#4cc38a" }[f.kind];
+  const tail = f.kind === "tang" ? "#ffd23a" : body;
+
+  // tail
+  ctx.fillStyle = tail;
+  ctx.beginPath();
+  ctx.moveTo(-14, 0); ctx.lineTo(-26, -9 + wiggle); ctx.lineTo(-26, 9 + wiggle);
+  ctx.closePath(); ctx.fill();
+  if (f.kind === "nemo") {
+    ctx.strokeStyle = "#111"; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+  // top fin
+  ctx.fillStyle = body;
+  ctx.beginPath();
+  ctx.moveTo(-6, -9); ctx.lineTo(2, -17); ctx.lineTo(10, -9);
+  ctx.closePath(); ctx.fill();
+  // body
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 18, 11, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (f.kind === "nemo") {
+    // white stripes with dark edges, kept inside the body
+    ctx.save();
+    ctx.beginPath(); ctx.ellipse(0, 0, 18, 11, 0, 0, Math.PI * 2); ctx.clip();
+    for (const sx of [-7, 7]) {
+      ctx.fillStyle = "#111"; ctx.fillRect(sx - 4, -12, 8, 24);
+      ctx.fillStyle = "#fff"; ctx.fillRect(sx - 2.5, -12, 5, 24);
+    }
+    ctx.restore();
+    ctx.strokeStyle = "#111"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(0, 0, 18, 11, 0, 0, Math.PI * 2); ctx.stroke();
+  } else if (f.kind === "tang") {
+    ctx.strokeStyle = "#0a1a55"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-8, 0); ctx.quadraticCurveTo(4, -6, 14, 2); ctx.stroke();
+  }
+  // eye
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.arc(11, -3, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#111";
+  ctx.beginPath(); ctx.arc(12, -3, 1.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
+function moveFish(f) {
+  // Lazy wandering
+  f.heading += (Math.random() - 0.5) * 0.2;
+  f.vx += Math.cos(f.heading) * 0.03;
+  f.vy += Math.sin(f.heading) * 0.015;
+
+  // Run away if the shark is close
+  const dx = f.x - shark.x;
+  const dy = f.y - shark.y;
+  const d = Math.hypot(dx, dy) || 1;
+  if (d < 220) {
+    const push = (1 - d / 220) * 1.2;
+    f.vx += (dx / d) * push;
+    f.vy += (dy / d) * push;
+  }
+
+  // Speed limit and drag so they calm down afterwards
+  const speed = Math.hypot(f.vx, f.vy);
+  const max = d < 220 ? 7 : 1.5;
+  if (speed > max) { f.vx *= max / speed; f.vy *= max / speed; }
+  f.vx *= 0.97; f.vy *= 0.97;
+
+  f.x += f.vx;
+  f.y += f.vy;
+
+  // Wrap sideways, bounce off top and bottom
+  if (f.x < -40) f.x = canvas.width + 40;
+  if (f.x > canvas.width + 40) f.x = -40;
+  if (f.y < 30) { f.y = 30; f.vy = Math.abs(f.vy); }
+  if (f.y > canvas.height - 30) { f.y = canvas.height - 30; f.vy = -Math.abs(f.vy); }
+}
+
 function frame() {
   // Ocean background
   const sea = ctx.createLinearGradient(0, 0, 0, canvas.height);
@@ -110,6 +210,7 @@ function frame() {
     ctx.stroke();
   }
 
+  for (const f of fishes) { moveFish(f); drawFish(f); }
   drawShark();
   requestAnimationFrame(frame);
 }
