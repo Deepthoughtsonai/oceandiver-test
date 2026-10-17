@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Titanic - Night of the Iceberg</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #02060d; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<script>
+// ---------------------------------------------------------------------------
+// Setup: the scene is drawn on a fixed 1600x900 stage that is scaled to fit.
+// ---------------------------------------------------------------------------
+const W = 1600, H = 900, WATER = 450, SEABED = 868;
+const canvas = document.getElementById("scene");
+const ctx = canvas.getContext("2d");
+let scale = 1, offX = 0, offY = 0;
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  scale = Math.min(canvas.width / W, canvas.height / H);
+  offX = (canvas.width - W * scale) / 2;
+  offY = (canvas.height - H * scale) / 2;
+}
+resize();
+window.addEventListener("resize", resize);
+
+// Small seeded random so the stars and seabed look the same every time.
+let seed = 7;
+function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const smooth = x => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
+const lerp = (a, b, t) => a + (b - a) * t;
+
+const stars = Array.from({ length: 170 }, () => ({
+  x: rnd() * W, y: rnd() * (WATER - 40), r: rnd() * 1.4 + 0.3, p: rnd() * 6.28
+}));
+const seabedPts = [];
+for (let x = 0; x <= W; x += 20) {
+  seabedPts.push([x, SEABED + Math.sin(x * 0.011) * 7 + Math.sin(x * 0.037) * 4 + rnd() * 3]);
+}
+const rocks = Array.from({ length: 14 }, () => ({ x: rnd() * W, r: 8 + rnd() * 16 }));
+
+function waveY(x, t) {
+  return WATER + Math.sin(x * 0.02 + t * 1.6) * 2.6 + Math.sin(x * 0.007 - t * 0.8) * 3.5;
+}
+
+// ---------------------------------------------------------------------------
+// Sound (made from scratch with the browser's audio; starts on first key press)
+// ---------------------------------------------------------------------------
+let ac = null, master, noiseBuf, engineGain, washGain;
+
+function initAudio() {
+  if (ac) { if (ac.state === "suspended") ac.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  ac = new AC();
+  master = ac.createGain(); master.gain.value = 0.55; master.connect(ac.destination);
+  noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+
+  // Always-on soft sea.
+  const sea = noiseSrc(true), seaF = ac.createBiquadFilter();
+  seaF.type = "lowpass"; seaF.frequency.value = 420;
+  const seaG = ac.createGain(); seaG.gain.value = 0.05;
+  sea.connect(seaF).connect(seaG).connect(master); sea.start();
+
+  // Engine rumble and water wash, louder the faster the ship moves.
+  const eng = noiseSrc(true), engF = ac.createBiquadFilter();
+  engF.type = "lowpass"; engF.frequency.value = 160;
+  engineGain = ac.createGain(); engineGain.gain.value = 0;
+  eng.connect(engF).connect(engineGain).connect(master); eng.start();
+  const hum = ac.createOscillator(); hum.type = "sine"; hum.frequency.value = 46;
+  hum.connect(engineGain); hum.start();
+  const wash = noiseSrc(true), washF = ac.createBiquadFilter();
+  washF.type = "bandpass"; washF.frequency.value = 900; washF.Q.value = 0.6;
+  washGain = ac.createGain(); washGain.gain.value = 0;
+  wash.connect(washF).connect(washGain).connect(master); wash.start();
+}
+function noiseSrc(loop) {
+  const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = !!loop; return s;
+}
+function burst(freq, type, dur, vol, q) {
+  if (!ac) return;
+  const s = noiseSrc(), f = ac.createBiquadFilter(), g = ac.createGain();
+  f.type = type; f.frequency.value = freq; if (q) f.Q.value = q;
+  g.gain.setValueAtTime(vol, ac.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+  s.connect(f).connect(g).connect(master); s.start(); s.stop(ac.currentTime + dur);
+}
+function tone(f0, f1, type, dur, vol, filterHz) {
+  if (!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain(), f = ac.createBiquadFilter();
+  o.type = type;
+  o.frequency.setValueAtTime(f0, ac.currentTime);
+  o.frequency.exponentialRampToValueAtTime(f1, ac.currentTime + dur);
+  f.type = "lowpass"; f.frequency.value = filterHz || 2000;
+  g.gain.setValueAtTime(0.0001, ac.currentTime);
+  g.gain.linearRampToValueAtTime(vol, ac.currentTime + Math.min(0.15, dur / 3));
+  g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+  o.connect(f).connect(g).connect(master); o.start(); o.stop(ac.currentTime + dur);
+}
+const sfx = {
+  horn() { tone(98, 96, "sawtooth", 2.4, 0.22, 700); tone(123, 121, "sawtooth", 2.4, 0.16, 700); },
+  crash() {
+    burst(1400, "lowpass", 1.8, 0.9);
+    tone(70, 28, "sine", 1.4, 0.9);
+    tone(520, 140, "sawtooth", 1.3, 0.18, 1800);   // metal screech
+  },
+  snap() { burst(900, "lowpass", 1.2, 0.8); tone(60, 25, "sine", 1.6, 0.9); },
+  creak() { tone(90, 150, "sawtooth", 2.6, 0.14, 380); tone(130, 70, "sawtooth", 3.2, 0.1, 320); },
+  splash() { burst(1300, "bandpass", 0.9, 0.5, 0.7); },
+  rumble() { burst(260, "lowpass", 6, 0.6); },
+  bubble() { tone(300 + Math.random() * 400, 900 + Math.random() * 500, "sine", 0.18, 0.08); }
+};
+
+// ---------------------------------------------------------------------------
+// The story
+// ---------------------------------------------------------------------------
+const SHIP_L = 520, SPLIT = 286, ICE_X = 1145, START_X = 80;
+const MAX_SPEED = 150;
+let state, shipX, speed, keyHeld, timeInState, shake, clock;
+let plank, chars, particles, boats;
+const smoke = [];
+
+function reset() {
+  state = "idle"; shipX = START_X; speed = 0; keyHeld = false;
+  timeInState = 0; shake = 0; particles = []; smoke.length = 0;
+  plank = null;
+  chars = { mode: "deck", t: 0, rose: null, jack: null };
+  boats = [
+    { x: 330, depth: 78, v: 13, s: 1.0, ph: 0 },
+    { x: 905, depth: 44, v: -9, s: 0.8, ph: 2 }
+  ];
+}
+reset();
+clock = 0;
+
+function press() {
+  initAudio();
+  keyHeld = true;
+  if (state === "idle") { state = "sailing"; sfx.horn(); }
+}
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") { e.preventDefault(); if (!e.repeat) press(); else keyHeld = true; }
+  else if (e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "ArrowDown") e.preventDefault();
+  else if ((e.key === "r" || e.key === "R") && state === "done") reset();
+});
+window.addEventListener("keyup", e => { if (e.key === "ArrowRight") keyHeld = false; });
+// Touch / mouse: holding anywhere acts like the right arrow.
+window.addEventListener("pointerdown", () => { if (state === "done") reset(); else press(); });
+window.addEventListener("pointerup", () => { keyHeld = false; });
+window.addEventListener("blur", () => { keyHeld = false; });
+
+// Positions of the broken halves, as functions of time since the split.
+function parts(tb) {
+  return {
+    front: { pv: 0.78 * SHIP_L, rot: 0.55 * smooth(tb / 5), dx: 25 * smooth(tb / 10), dy: 330 * smooth((tb - 2) / 9) },
+    rear:  { pv: 0.28 * SHIP_L, rot: 1.05 * smooth(tb / 6), dx: -20 * smooth(tb / 10), dy: 250 * smooth((tb - 3) / 9) }
+  };
+}
+function frontPoint(lx, ly, tb) {   // where a spot on the front half is in the world
+  const p = parts(tb).front;
+  const vx = lx - p.pv, vy = ly, c = Math.cos(p.rot), s = Math.sin(p.rot);
+  return [shipX + p.pv + p.dx + vx * c - vy * s, WATER + p.dy + vx * s + vy * c];
+}
+
+function addSplash(x, y, n, power) {
+  for (let i = 0; i < n; i++) {
+    particles.push({ k: "drop", x, y, vx: (Math.random() - 0.5) * 120 * power, vy: -Math.random() * 200 * power, life: 1, age: 0 });
+  }
+}
+function addIce(x, y, n) {
+  for (let i = 0; i < n; i++) {
+    particles.push({ k: "ice", x, y, vx: -60 - Math.random() * 160, vy: -Math.random() * 220, life: 1.6, age: 0, r: 2 + Math.random() * 4 });
+  }
+}
+
+function update(dt) {
+  clock += dt;
+  timeInState += dt;
+  shake = Math.max(0, shake - dt * 0.7);
+
+  if (state === "sailing") {
+    speed = clamp(speed + (keyHeld ? 55 : -28) * dt, 0, MAX_SPEED);
+    shipX += speed * dt;
+    if (shipX + SHIP_L >= ICE_X) {
+      shipX = ICE_X - SHIP_L; speed = 0;
+      state = "scrape"; timeInState = 0; shake = 1;
+      sfx.crash(); addIce(ICE_X - 10, WATER - 40, 40);
+    }
+  } else if (state === "scrape") {
+    if (timeInState < 1 && Math.random() < 0.6) addIce(ICE_X - 20, WATER - 10, 2);
+    if (timeInState > 1.7) { state = "breaking"; timeInState = 0; shake = 1; sfx.snap(); sfx.creak(); sfx.rumble(); }
+  } else if (state === "breaking") {
+    const tb = timeInState;
+    if (!plank && tb > 0.6) {
+      plank = { x: shipX + 430, y: WATER - 70, vy: 0, vx: 7, landed: false };
+    }
+    if (plank) {
+      if (!plank.landed) {
+        plank.vy += 500 * dt; plank.y += plank.vy * dt;
+        if (plank.y >= waveY(plank.x, clock)) { plank.landed = true; addSplash(plank.x, WATER, 14, 0.8); sfx.splash(); }
+      } else plank.y = waveY(plank.x, clock);
+      plank.x += plank.vx * dt;
+    }
+    // Rose and Jack leap off the falling bow onto the wood.
+    if (chars.mode === "deck" && tb > 1.8) {
+      chars.mode = "leap"; chars.t = 0;
+      chars.rose = { from: frontPoint(505, -62, tb) };
+      chars.jack = { from: frontPoint(486, -62, tb) };
+    }
+    if (chars.mode === "leap") {
+      chars.t += dt;
+      if (chars.t >= 1.5) { chars.mode = "float"; addSplash(plank.x, WATER, 18, 1); sfx.splash(); }
+    }
+    // Bubbles and rumbles from the sinking halves.
+    if (tb > 1.5 && tb < 14 && Math.random() < 0.5) {
+      const p = parts(tb), half = Math.random() < 0.5 ? p.front : p.rear;
+      particles.push({ k: "bub", x: shipX + half.pv + half.dx + (Math.random() - 0.5) * 140,
+        y: WATER + half.dy + Math.random() * 40, vx: 0, vy: -50 - Math.random() * 50, life: 3, age: 0, r: 2 + Math.random() * 4 });
+      if (Math.random() < 0.15) sfx.bubble();
+    }
+    if (tb > 16) state = "done";
+  }
+
+  // Sound levels follow the ship's speed.
+  if (engineGain) {
+    engineGain.gain.value = state === "sailing" ? 0.1 + 0.3 * (speed / MAX_SPEED) : 0;
+    washGain.gain.value = state === "sailing" ? 0.22 * (speed / MAX_SPEED) : 0;
+  }
+
+  // Funnel smoke.
+  if ((state === "idle" || state === "sailing" || state === "scrape") && Math.random() < 0.25) {
+    smoke.push({ x: shipX + 170, y: WATER - 200, vx: -8 - speed * 0.25, vy: -16, age: 0, r: 6 });
+  }
+  for (let i = smoke.length - 1; i >= 0; i--) {
+    const s = smoke[i]; s.age += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.r += 6 * dt;
+    if (s.age > 5) smoke.splice(i, 1);
+  }
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i]; p.age += dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.k !== "bub") p.vy += 500 * dt;
+    if (p.k !== "bub" && p.y > WATER && p.vy > 0) { p.life = 0; }
+    if (p.age > p.life) particles.splice(i, 1);
+  }
+  for (const b of boats) {
+    b.x += b.v * dt;
+    if (b.x > W + 120) b.x = -120;
+    if (b.x < -120) b.x = W + 120;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Drawing helpers
+// ---------------------------------------------------------------------------
+function poly(pts, fill, stroke) {
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); }
+}
+
+function drawSky() {
+  const g = ctx.createLinearGradient(0, 0, 0, WATER);
+  g.addColorStop(0, "#02040c"); g.addColorStop(0.7, "#0b1a33"); g.addColorStop(1, "#1d3558");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, WATER + 20);
+  for (const s of stars) {
+    ctx.globalAlpha = 0.5 + 0.5 * Math.sin(clock * 1.5 + s.p);
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.28); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // Moon with a glow.
+  const mg = ctx.createRadialGradient(1020, 120, 5, 1020, 120, 160);
+  mg.addColorStop(0, "rgba(255,250,225,0.5)"); mg.addColorStop(1, "rgba(255,250,225,0)");
+  ctx.fillStyle = mg; ctx.fillRect(850, 0, 340, 300);
+  ctx.fillStyle = "#fbf6e3"; ctx.beginPath(); ctx.arc(1020, 120, 34, 0, 6.28); ctx.fill();
+  ctx.fillStyle = "#e3dcc2";
+  ctx.beginPath(); ctx.arc(1008, 112, 6, 0, 6.28); ctx.arc(1033, 133, 8, 0, 6.28); ctx.arc(1030, 104, 4, 0, 6.28); ctx.fill();
+}
+
+function drawUnderwaterBase() {
+  const g = ctx.createLinearGradient(0, WATER, 0, H);
+  g.addColorStop(0, "#0f3556"); g.addColorStop(0.5, "#082540"); g.addColorStop(1, "#030d1a");
+  ctx.fillStyle = g; ctx.fillRect(0, WATER, W, H - WATER);
+  // Seabed
+  ctx.beginPath(); ctx.moveTo(0, H);
+  for (const [x, y] of seabedPts) ctx.lineTo(x, y);
+  ctx.lineTo(W, H); ctx.closePath();
+  const sg = ctx.createLinearGradient(0, SEABED - 10, 0, H);
+  sg.addColorStop(0, "#3b4a46"); sg.addColorStop(1, "#16201f");
+  ctx.fillStyle = sg; ctx.fill();
+  ctx.fillStyle = "#2b3836";
+  for (const r of rocks) { ctx.beginPath(); ctx.ellipse(r.x, SEABED + 8, r.r, r.r * 0.55, 0, Math.PI, 0); ctx.fill(); }
+}
+
+const ICE_TOP = [[1190, 450], [1232, 408], [1262, 380], [1285, 322], [1318, 296], [1352, 340], [1378, 366], [1412, 398], [1446, 424], [1472, 450]];
+const ICE_UNDER = [[1472, 450], [1500, 505], [1542, 600], [1490, 722], [1380, 802], [1256, 782], [1150, 686], [1100, 585], [1128, 500], [1190, 450]];
+function drawIceberg() {
+  // Hidden part (seen through the water)
+  poly(ICE_UNDER, "#2f6f95");
+  poly([[1190, 450], [1128, 500], [1100, 585], [1150, 686], [1256, 782], [1300, 600]], "rgba(10,40,70,0.35)");
+  poly([[1472, 450], [1500, 505], [1542, 600], [1490, 722], [1380, 802], [1340, 600]], "rgba(150,210,240,0.2)");
+  // Tip above the surface
+  poly(ICE_TOP, "#dff2fb");
+  poly([[1318, 296], [1352, 340], [1378, 366], [1412, 398], [1446, 424], [1472, 450], [1340, 450]], "#a9cfe3");
+  poly([[1190, 450], [1232, 408], [1262, 380], [1285, 322], [1318, 296], [1300, 450]], "#f4fbff");
+}
+
+// --- people ----------------------------------------------------------------
+// Feet at (0,0), facing right. pose: "bow" (arms out), "air" (arms up).
+function drawRose(pose) {
+  ctx.lineCap = "round";
+  ctx.fillStyle = "#c9a07a"; // hair behind
+  ctx.beginPath(); ctx.ellipse(-3, -45, 6, 8, 0.3, 0, 6.28); ctx.fill();
+  ctx.fillStyle = "#b5532e";
+  ctx.beginPath(); ctx.ellipse(-5, -44, 5, 9, 0.35, 0, 6.28); ctx.fill();
+  poly([[-4, -38], [5, -38], [11, 0], [-11, 0]], "#e6d9c3");           // dress
+  ctx.strokeStyle = "#f2e8d8"; ctx.lineWidth = 3.5;
+  ctx.beginPath();
+  if (pose === "air") { ctx.moveTo(0, -36); ctx.lineTo(-10, -58); ctx.moveTo(0, -36); ctx.lineTo(12, -58); }
+  else { ctx.moveTo(-18, -38); ctx.lineTo(18, -38); }
+  ctx.stroke();
+  ctx.fillStyle = "#f1c9a6"; ctx.beginPath(); ctx.arc(1, -46, 5.2, 0, 6.28); ctx.fill();
+}
+function drawJack(pose) {
+  ctx.lineCap = "round";
+  poly([[-4, -22], [4, -22], [3, 0], [-1, 0], [-2, -12], [-4, 0], [-8, 0]].map(p => p), "#2a2f3a"); // trousers
+  poly([[-6, -40], [6, -40], [5, -20], [-5, -20]], "#7d5a3a");                                     // vest
+  ctx.strokeStyle = "#e8e0cf"; ctx.lineWidth = 3.5;
+  ctx.beginPath();
+  if (pose === "air") { ctx.moveTo(0, -37); ctx.lineTo(-10, -56); ctx.moveTo(0, -37); ctx.lineTo(12, -56); }
+  else { ctx.moveTo(0, -37); ctx.lineTo(24, -34); ctx.moveTo(0, -37); ctx.lineTo(-18, -34); }
+  ctx.stroke();
+  ctx.fillStyle = "#f1c9a6"; ctx.beginPath(); ctx.arc(1, -46, 5.5, 0, 6.28); ctx.fill();
+  ctx.fillStyle = "#c9a45a"; ctx.beginPath(); ctx.arc(0, -49, 5.4, Math.PI, 0); ctx.fill();         // hair
+}
+
+// --- the ship --------------------------------------------------------------
+function drawShipBody(lit, withChars) {
+  // Masts
+  ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(445, -62); ctx.lineTo(445, -190); ctx.moveTo(60, -62); ctx.lineTo(60, -160); ctx.stroke();
+  ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(430, -170); ctx.lineTo(460, -170); ctx.stroke();
+  // Hull
+  poly([[0, -50], [18, 35], [470, 35], [524, -64], [520, -66], [8, -66]], "#12151a");
+  poly([[10, 5], [18, 35], [470, 35], [488, 5]], "#8a2a22");                      // red lower hull
+  ctx.fillStyle = "#e9e4d6"; ctx.fillRect(6, -62, 516, 4);                        // white rail stripe
+  // Lower & upper cabins
+  ctx.fillStyle = "#ece6d4"; ctx.fillRect(95, -100, 345, 38);
+  ctx.fillStyle = "#d9d2bd"; ctx.fillRect(150, -128, 250, 28);
+  ctx.fillStyle = "#6b4a2a"; ctx.fillRect(95, -102, 345, 3); ctx.fillRect(150, -130, 250, 3);
+  // Lit windows
+  for (let x = 12; x < 505; x += 14) {
+    ctx.fillStyle = `rgba(255,210,120,${lit * 0.9})`;
+    if (x > 20 && x < 490) ctx.fillRect(x, -48, 5, 5);
+    if (x > 100 && x < 430) ctx.fillRect(x, -90, 6, 8);
+    if (x > 155 && x < 390) ctx.fillRect(x, -120, 6, 7);
+    if (lit < 1) { ctx.fillStyle = `rgba(30,30,40,${(1 - lit) * 0.8})`; if (x > 100 && x < 430) ctx.fillRect(x, -90, 6, 8); }
+  }
+  // Funnels
+  for (let i = 0; i < 4; i++) {
+    const fx = 170 + i * 72;
+    poly([[fx - 18, -128], [fx + 18, -128], [fx + 15, -205], [fx - 15, -205]], "#d9a441");
+    ctx.fillStyle = "#101010"; ctx.fillRect(fx - 16, -213, 32, 14);
+    ctx.fillStyle = "#b9862c"; ctx.fillRect(fx + 6, -200, 7, 72);
+  }
+  // Bow rail
+  ctx.strokeStyle = "#cfc8b4"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(470, -66); ctx.lineTo(470, -84); ctx.lineTo(520, -84); ctx.lineTo(520, -66); ctx.stroke();
+  if (withChars) {
+    ctx.save(); ctx.translate(486, -66); ctx.scale(1.05, 1.05); drawJack("bow"); ctx.restore();
+    ctx.save(); ctx.translate(505, -66); ctx.scale(1.05, 1.05); drawRose("bow"); ctx.restore();
+  }
+}
+
+function drawShip() {
+  const lit = state === "breaking" ? 1 - smooth((timeInState - 2.5) / 5) : 1;
+  const withChars = chars.mode === "deck";
+  if (state !== "breaking" && state !== "done") {
+    ctx.save();
+    const tilt = state === "scrape" ? -0.012 * Math.sin(timeInState * 9) * (1 - timeInState / 1.7) : 0;
+    ctx.translate(shipX + 260, WATER); ctx.rotate(tilt); ctx.translate(-260, 0);
+    drawShipBody(1, true);
+    ctx.restore();
+    return;
+  }
+  const tb = state === "done" ? 99 : timeInState, p = parts(tb);
+  const zig = [[0, -400], [SPLIT + 12, -400], [SPLIT - 6, -190], [SPLIT + 14, -120], [SPLIT - 8, -60], [SPLIT + 10, 0], [SPLIT - 10, 60], [SPLIT + 6, 120], [SPLIT, 200], [0, 200]];
+  const zigF = [[SPLIT + 12, -400], [W, -400], [W, 200], [SPLIT, 200], [SPLIT + 6, 120], [SPLIT - 10, 60], [SPLIT + 10, 0], [SPLIT - 8, -60], [SPLIT + 14, -120], [SPLIT - 6, -190]];
+  const jaggedR = zig.map(p => p), jaggedF = zigF.map(p => p);
+  for (const [part, clipPts] of [[p.rear, jaggedR], [p.front, jaggedF]]) {
+    ctx.save();
+    ctx.translate(shipX + part.pv + part.dx, WATER + part.dy);
+    ctx.rotate(part.rot);
+    ctx.translate(-part.pv, 0);
+    ctx.beginPath(); ctx.moveTo(clipPts[0][0], clipPts[0][1]);
+    for (let i = 1; i < clipPts.length; i++) ctx.lineTo(clipPts[i][0], clipPts[i][1]);
+    ctx.closePath(); ctx.clip();
+    drawShipBody(lit, withChars);
+    ctx.restore();
+  }
+}
+
+function drawSmoke() {
+  for (const s of smoke) {
+    ctx.fillStyle = `rgba(190,190,200,${0.35 * (1 - s.age / 5)})`;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.28); ctx.fill();
+  }
+}
+
+// --- water -----------------------------------------------------------------
+function waterPath() {
+  ctx.beginPath(); ctx.moveTo(0, H);
+  for (let x = 0; x <= W; x += 8) ctx.lineTo(x, waveY(x, clock));
+  ctx.lineTo(W, H); ctx.closePath();
+}
+function drawWaterOverlay() {
+  waterPath();
+  const g = ctx.createLinearGradient(0, WATER, 0, H);
+  g.addColorStop(0, "rgba(16,56,92,0.55)"); g.addColorStop(1, "rgba(2,10,24,0.78)");
+  ctx.fillStyle = g; ctx.fill();
+  // Surface line and moon glitter
+  ctx.strokeStyle = "rgba(160,200,235,0.55)"; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += 8) { const y = waveY(x, clock); x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  ctx.stroke();
+  for (let i = 0; i < 26; i++) {
+    const y = WATER + 4 + i * 5.5, wob = Math.sin(clock * 2 + i) * 10;
+    ctx.fillStyle = `rgba(255,248,215,${0.45 * (1 - i / 26) * (0.5 + 0.5 * Math.sin(clock * 3 + i * 1.7))})`;
+    ctx.fillRect(1020 + wob - 40 * (1 - i / 40), y, 80 * (1 - i / 36) + 6, 1.6);
+  }
+}
+
+// --- lifeboats -------------------------------------------------------------
+function drawBoat(b) {
+  const y0 = waveY(b.x, clock) + b.depth;
+  const bob = Math.sin(clock * 1.7 + b.ph) * 3;
+  const rot = Math.sin(clock * 1.3 + b.ph) * 0.04;
+  // ripples
+  ctx.strokeStyle = "rgba(170,210,240,0.35)"; ctx.lineWidth = 1.2;
+  for (let i = 0; i < 2; i++) {
+    ctx.beginPath(); ctx.ellipse(b.x, y0 + 4 + bob, (62 + i * 14 + Math.sin(clock * 2 + i) * 3) * b.s, (7 + i * 3) * b.s, 0, 0, 6.28); ctx.stroke();
+  }
+  ctx.save(); ctx.translate(b.x, y0 + bob); ctx.scale(b.s, b.s); ctx.rotate(rot);
+  poly([[-58, -14], [58, -14], [48, 4], [-48, 4]], "#6a4526");               // wooden hull
+  poly([[-58, -14], [58, -14], [56, -9], [-56, -9]], "#e8e2d0");              // white gunwale
+  ctx.fillStyle = "#b8772a"; ctx.fillRect(-52, -2, 104, 3);
+  // passengers (heads and shoulders)
+  const cols = ["#5a2a2a", "#2b3f5c", "#6b5a3a", "#40304f", "#2b5a4a"];
+  for (let i = 0; i < 5; i++) {
+    const px = -36 + i * 18;
+    ctx.fillStyle = cols[i]; ctx.beginPath(); ctx.ellipse(px, -17, 6, 8, 0, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = "#e8bf9c"; ctx.beginPath(); ctx.arc(px, -25, 4.5, 0, 6.28); ctx.fill();
+  }
+  // oars
+  ctx.strokeStyle = "#4a3320"; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(-20, -14); ctx.lineTo(-44, 14); ctx.moveTo(20, -14); ctx.lineTo(44, 14); ctx.stroke();
+  // lantern
+  ctx.fillStyle = "#6a4526"; ctx.fillRect(56, -34, 2, 20);
+  const lg = ctx.createRadialGradient(57, -36, 1, 57, -36, 26);
+  lg.addColorStop(0, "rgba(255,210,120,0.9)"); lg.addColorStop(1, "rgba(255,210,120,0)");
+  ctx.fillStyle = lg; ctx.fillRect(30, -62, 54, 54);
+  ctx.restore();
+}
+
+// --- plank with Rose and Jack ---------------------------------------------
+function drawPlankScene() {
+  if (!plank) return;
+  const slope = Math.sin(plank.x * 0.02 + clock * 1.6) * 0.04;
+  const bob = plank.landed ? Math.sin(clock * 1.5) * 1.5 : 0;
+  ctx.save(); ctx.translate(plank.x, plank.y + bob); ctx.rotate(plank.landed ? slope : plank.vy * 0.002);
+  // the wood panel
+  poly([[-82, -5], [82, -5], [82, 5], [-82, 5]], "#a9763f");
+  ctx.fillStyle = "#7d5128"; ctx.fillRect(-82, 3, 164, 3);
+  ctx.strokeStyle = "#c79a64"; ctx.lineWidth = 1.2; ctx.strokeRect(-70, -3.5, 140, 5);
+  if (chars.mode === "float") {
+    // Rose lying on the wood
+    poly([[-18, -5], [34, -5], [34, -12], [-12, -15]], "#e6d9c3");
+    ctx.fillStyle = "#f1c9a6"; ctx.beginPath(); ctx.arc(40, -12, 5.2, 0, 6.28); ctx.fill();
+    ctx.fillStyle = "#b5532e"; ctx.beginPath(); ctx.ellipse(46, -10, 8, 4, 0.1, 0, 6.28); ctx.fill();
+    // Jack in the water, holding the edge
+    ctx.fillStyle = "#7d5a3a"; ctx.beginPath(); ctx.ellipse(-52, 4, 9, 7, 0, Math.PI, 0); ctx.fill();
+    ctx.strokeStyle = "#e8e0cf"; ctx.lineWidth = 3.5; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(-50, 1); ctx.lineTo(-30, -6); ctx.stroke();
+    ctx.fillStyle = "#f1c9a6"; ctx.beginPath(); ctx.arc(-52, -8, 5.5, 0, 6.28); ctx.fill();
+    ctx.fillStyle = "#c9a45a"; ctx.beginPath(); ctx.arc(-52, -10, 5.4, Math.PI, 0); ctx.fill();
+  }
+  ctx.restore();
+  if (chars.mode === "float") {   // water lapping over Jack
+    ctx.fillStyle = "rgba(16,56,92,0.8)";
+    ctx.fillRect(plank.x - 64, plank.y + bob + 3, 26, 14);
+  }
+  if (chars.mode === "leap") {
+    const u = clamp(chars.t / 1.5, 0, 1);
+    for (const [who, c, dest, delay, fn] of [
+      ["rose", chars.rose, plank.x + 40, 0.0, drawRose], ["jack", chars.jack, plank.x - 50, 0.12, drawJack]
+    ]) {
+      const k = clamp((u - delay) / (1 - delay), 0, 1);
+      const x = lerp(c.from[0], dest, k);
+      const y = lerp(c.from[1], plank.y - 6, k) - 90 * 4 * k * (1 - k);
+      ctx.save(); ctx.translate(x, y + 0); ctx.rotate((who === "rose" ? 1 : -1) * (k - 0.5) * 0.5); ctx.scale(1.05, 1.05);
+      fn("air"); ctx.restore();
+    }
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const a = 1 - p.age / p.life;
+    if (p.k === "bub") {
+      ctx.strokeStyle = `rgba(200,235,255,${0.6 * a})`; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.28); ctx.stroke();
+    } else if (p.k === "ice") {
+      ctx.fillStyle = `rgba(235,248,255,${a})`;
+      ctx.fillRect(p.x, p.y, p.r, p.r);
+    } else {
+      ctx.fillStyle = `rgba(220,240,255,${a})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 2.2, 0, 6.28); ctx.fill();
+    }
+  }
+}
+
+function drawText() {
+  ctx.textAlign = "center";
+  ctx.font = "300 34px Georgia, serif";
+  ctx.fillStyle = "rgba(235,240,250,0.85)";
+  if (state === "idle") {
+    ctx.fillText("North Atlantic, April 14th, 1912", W / 2, 70);
+    ctx.font = "20px Georgia, serif";
+    ctx.globalAlpha = 0.6 + 0.4 * Math.sin(clock * 3);
+    ctx.fillText("Hold the RIGHT ARROW key to set sail", W / 2, 108);
+    ctx.globalAlpha = 1;
+  } else if (state === "sailing" && shipX < START_X + 120) {
+    ctx.font = "20px Georgia, serif";
+    ctx.fillStyle = "rgba(235,240,250,0.6)";
+    ctx.fillText("Keep holding the RIGHT ARROW...", W / 2, 70);
+  } else if (state === "scrape" || (state === "breaking" && timeInState < 4)) {
+    ctx.fillStyle = "rgba(255,230,230,0.9)"; ctx.fillText("Iceberg right ahead!", W / 2, 70);
+  } else if (state === "done") {
+    ctx.fillText("Rose and Jack drift on, as the lifeboats row on.", W / 2, 70);
+    ctx.font = "20px Georgia, serif"; ctx.globalAlpha = 0.6 + 0.4 * Math.sin(clock * 3);
+    ctx.fillText("Press R to replay", W / 2, 108); ctx.globalAlpha = 1;
+  }
+}
+
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#02060d"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(scale, 0, 0, scale, offX, offY);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * 14 * shake, (Math.random() - 0.5) * 8 * shake);
+
+  drawSky();
+  drawUnderwaterBase();
+  drawIceberg();
+  drawShip();
+  drawSmoke();
+  drawWaterOverlay();
+  for (const b of boats) drawBoat(b);
+  drawPlankScene();
+  drawParticles();
+  ctx.restore();
+  drawText();
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
