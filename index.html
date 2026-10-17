@@ -165,16 +165,169 @@ function moveFish(f) {
   if (f.x < -40) f.x = canvas.width + 40;
   if (f.x > canvas.width + 40) f.x = -40;
   if (f.y < 30) { f.y = 30; f.vy = Math.abs(f.vy); }
-  if (f.y > canvas.height - 30) { f.y = canvas.height - 30; f.vy = -Math.abs(f.vy); }
+  if (f.y > floorY() - 20) { f.y = floorY() - 20; f.vy = -Math.abs(f.vy); }
+}
+
+// Sea floor, seaweed, shipwreck and turtles
+function floorY() { return canvas.height - Math.max(60, canvas.height * 0.12); }
+
+const weeds = [];
+for (let i = 0; i < 22; i++) {
+  weeds.push({
+    x: Math.random(),
+    h: 40 + Math.random() * 70,
+    phase: Math.random() * 6,
+    color: ["#2e8b57", "#3cb371", "#1f6f4a"][i % 3]
+  });
+}
+
+function drawSeaweed(w, t) {
+  const baseX = w.x * canvas.width;
+  const baseY = floorY() + 12;
+  const segs = 6;
+  ctx.strokeStyle = w.color;
+  ctx.lineWidth = 6;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(baseX, baseY);
+  for (let i = 1; i <= segs; i++) {
+    const sway = Math.sin(t * 1.5 + w.phase + i * 0.6) * i * 3;
+    ctx.lineTo(baseX + sway, baseY - (w.h / segs) * i);
+  }
+  ctx.stroke();
+}
+
+function drawWreck() {
+  const x = canvas.width * 0.72;
+  const y = floorY() + 14;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(-0.12);
+  // hull
+  ctx.fillStyle = "#2b3440";
+  ctx.beginPath();
+  ctx.moveTo(-120, -35); ctx.lineTo(110, -40); ctx.lineTo(138, -64);
+  ctx.lineTo(100, 0); ctx.lineTo(-110, 0);
+  ctx.closePath(); ctx.fill();
+  // red stripe near the waterline
+  ctx.fillStyle = "#7a2a2a";
+  ctx.fillRect(-118, -12, 214, 6);
+  // upper deck
+  ctx.fillStyle = "#3d4a58";
+  ctx.fillRect(-85, -62, 160, 24);
+  // four funnels
+  for (let i = 0; i < 4; i++) {
+    const fx = -60 + i * 38;
+    ctx.fillStyle = "#6b4a2f";
+    ctx.fillRect(fx, -104, 16, 44);
+    ctx.fillStyle = "#1a1a1a";
+    ctx.fillRect(fx, -104, 16, 7);
+  }
+  // portholes
+  ctx.fillStyle = "rgba(160, 220, 235, 0.7)";
+  for (let i = 0; i < 12; i++) {
+    ctx.beginPath();
+    ctx.arc(-100 + i * 18, -24, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // broken mast
+  ctx.strokeStyle = "#2b3440";
+  ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(95, -45); ctx.lineTo(115, -95); ctx.stroke();
+  ctx.restore();
+}
+
+function drawFloor() {
+  const top = floorY();
+  const sand = ctx.createLinearGradient(0, top, 0, canvas.height);
+  sand.addColorStop(0, "#d9c28a");
+  sand.addColorStop(1, "#8c7646");
+  ctx.fillStyle = sand;
+  ctx.beginPath();
+  ctx.moveTo(0, canvas.height);
+  for (let x = 0; x <= canvas.width; x += 20) {
+    ctx.lineTo(x, top + Math.sin(x * 0.012) * 8 + Math.sin(x * 0.04) * 3);
+  }
+  ctx.lineTo(canvas.width, canvas.height);
+  ctx.closePath();
+  ctx.fill();
+}
+
+const turtles = [];
+for (let i = 0; i < 3; i++) {
+  turtles.push({
+    x: Math.random() * canvas.width,
+    y: 100 + Math.random() * Math.max(50, floorY() - 250),
+    vx: Math.random() < 0.5 ? -0.6 : 0.6,
+    vy: 0,
+    heading: Math.random() * 6,
+    size: 0.9 + Math.random() * 0.4
+  });
+}
+
+function moveTurtle(u) {
+  // Slow lazy swimming; they pay no attention to the shark.
+  u.heading += (Math.random() - 0.5) * 0.05;
+  u.vy = Math.sin(u.heading) * 0.2;
+  u.x += u.vx;
+  u.y += u.vy;
+  if (u.x < -60) u.x = canvas.width + 60;
+  if (u.x > canvas.width + 60) u.x = -60;
+  u.y = Math.max(60, Math.min(floorY() - 60, u.y));
+}
+
+function drawTurtle(u, t) {
+  const dir = u.vx >= 0 ? 1 : -1;
+  const paddle = Math.sin(t * 2 + u.heading) * 0.4;
+  ctx.save();
+  ctx.translate(u.x, u.y);
+  ctx.scale(dir * u.size, u.size);
+
+  // flippers
+  ctx.fillStyle = "#7fb069";
+  ctx.save(); ctx.translate(14, 10); ctx.rotate(0.5 + paddle);
+  ctx.beginPath(); ctx.ellipse(8, 0, 14, 5, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  ctx.save(); ctx.translate(-14, 10); ctx.rotate(2.6 - paddle);
+  ctx.beginPath(); ctx.ellipse(8, 0, 12, 5, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  ctx.save(); ctx.translate(14, -8); ctx.rotate(-0.5 - paddle);
+  ctx.beginPath(); ctx.ellipse(8, 0, 14, 5, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  // tail and head
+  ctx.beginPath(); ctx.moveTo(-30, 0); ctx.lineTo(-40, 3); ctx.lineTo(-30, 5); ctx.fill();
+  ctx.beginPath(); ctx.arc(36, -2, 9, 0, Math.PI * 2); ctx.fill();
+  // eye
+  ctx.fillStyle = "#111";
+  ctx.beginPath(); ctx.arc(40, -4, 1.8, 0, Math.PI * 2); ctx.fill();
+  // shell
+  ctx.fillStyle = "#6a8f3c";
+  ctx.beginPath(); ctx.ellipse(0, 0, 32, 20, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#3f5a22"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(0, 0, 32, 20, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-14, -16); ctx.lineTo(-6, 0); ctx.lineTo(-14, 16);
+  ctx.moveTo(14, -16); ctx.lineTo(6, 0); ctx.lineTo(14, 16);
+  ctx.moveTo(-6, 0); ctx.lineTo(6, 0);
+  ctx.stroke();
+
+  ctx.restore();
 }
 
 function frame() {
-  // Ocean background
+  const t = performance.now() / 1000;
+
+  // Ocean background: bright at the surface, dark in the deep
   const sea = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  sea.addColorStop(0, "#2fa4d8");
-  sea.addColorStop(1, "#06324f");
+  sea.addColorStop(0, "#8be8ff");
+  sea.addColorStop(0.25, "#35b6e8");
+  sea.addColorStop(0.55, "#1672b0");
+  sea.addColorStop(0.8, "#0a3d6b");
+  sea.addColorStop(1, "#041d3a");
   ctx.fillStyle = sea;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  drawWreck();
+  drawFloor();
+  for (const w of weeds) drawSeaweed(w, t);
+  for (const u of turtles) { moveTurtle(u); drawTurtle(u, t); }
 
   // Swim a little closer to the target each frame, turning to face it.
   const dx = target.x - shark.x;
